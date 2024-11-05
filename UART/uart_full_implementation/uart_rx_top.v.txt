@@ -1,0 +1,180 @@
+module uart_rx_top(
+    input wire clk,               // System clock
+    input wire rst,               // Asynchronous reset (active high)
+    input wire baud_pulse,        // Baud rate pulse
+    input wire rx,                // Serial data input
+    input wire sticky_parity,     // Sticky parity select
+    input wire eps,               // Even parity select
+    input wire pen,               // Parity enable
+    input wire [1:0] wls,         // Word length select
+    output reg push,              // Data ready signal (indicates data is valid)
+    output reg pe,                // Parity error flag
+    output reg fe,                // Framing error flag
+    output reg bi,                // Break interrupt flag
+    output reg oe,                // Overrun error flag
+    output reg [7:0] dout         // Received data output
+);
+
+    // State encoding for FSM
+    typedef enum logic [2:0] {
+        IDLE    = 3'b000,
+        START   = 3'b001,
+        DATA    = 3'b010,
+        PARITY  = 3'b011,
+        STOP    = 3'b100
+    } state_type;
+
+    state_type state;             // Current state
+
+    // Edge detection for rx signal
+    reg rx_sync1, rx_sync2;
+    always @(posedge clk) begin
+        rx_sync1 <= rx;
+        rx_sync2 <= rx_sync1;
+    end
+
+    wire fall_edge = rx_sync2 & ~rx_sync1; // Detect falling edge
+
+    reg [2:0] bitcnt;             // Bit counter for data bits
+    reg [4:0] count;              // Counter for baud_pulse timing
+    reg [7:0] data_reg;           // Register to hold received data
+    reg parity_bit;               // Received parity bit
+    reg parity_calc;              // Calculated parity for comparison
+    reg overrun_detected;         // Overrun error detection
+
+    // Synchronization of control signals
+    reg pen_sync, sticky_parity_sync, eps_sync;
+    reg [1:0] wls_sync;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            pen_sync            <= 1'b0;
+            sticky_parity_sync  <= 1'b0;
+            eps_sync            <= 1'b0;
+            wls_sync            <= 2'b00;
+        end else begin
+            pen_sync            <= pen;
+            sticky_parity_sync  <= sticky_parity;
+            eps_sync            <= eps;
+            wls_sync            <= wls;
+        end
+    end
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state       <= IDLE;
+            push        <= 1'b0;
+            pe          <= 1'b0;
+            fe          <= 1'b0;
+            bi          <= 1'b0;
+            oe          <= 1'b0;
+            dout        <= 8'd0;
+            data_reg    <= 8'd0;
+            bitcnt      <= 3'd0;
+            count       <= 5'd0;
+            overrun_detected <= 1'b0;
+        end else begin
+            if (baud_pulse) begin
+                case (state)
+                    IDLE: begin
+                        push <= 1'b0;
+                        oe   <= overrun_detected; // Set overrun error flag if detected
+                        overrun_detected <= 1'b0; // Clear overrun detection
+                        if (fall_edge) begin
+                            state <= START;
+                            count <= 5'd15; // Wait half a bit period
+                        end
+                    end
+
+                    START: begin
+                        if (count == 0) begin
+                            if (rx_sync1 == 1'b0) begin
+                                // Valid start bit detected
+                                // Set bit counter based on word length select
+                                case (wls_sync)
+                                    2'b00: bitcnt <= 3'd5; // 5 data bits
+                                    2'b01: bitcnt <= 3'd6; // 6 data bits
+                                    2'b10: bitcnt <= 3'd7; // 7 data bits
+                                    2'b11: bitcnt <= 3'd8; // 8 data bits
+                                endcase
+                                state <= DATA;
+                                count <= 5'd15; // Prepare for first data bit
+                            end else begin
+                                state <= IDLE; // False start bit
+                            end
+                        end else begin
+                            count <= count - 1;
+                        end
+                    end
+
+                    DATA: begin
+                        if (count == 0) begin
+                            data_reg <= {rx_sync1, data_reg[7:1]}; // Shift in data bit
+                            if (bitcnt == 1) begin
+                                if (pen_sync) begin
+                                    state <= PARITY;
+                                    count <= 5'd15;
+                                end else begin
+                                    state <= STOP;
+                                    count <= 5'd15;
+                                end
+                            end else begin
+                                bitcnt <= bitcnt - 1;
+                            end
+                            count <= 5'd15;
+                        end else begin
+                            count <= count - 1;
+                        end
+                    end
+
+                    PARITY: begin
+                        if (count == 0) begin
+                            parity_bit <= rx_sync1;
+                            // Calculate expected parity
+                            case (wls_sync)
+                                2'b00: parity_calc <= ^data_reg[4:0]; // For 5 bits
+                                2'b01: parity_calc <= ^data_reg[5:0]; // For 6 bits
+                                2'b10: parity_calc <= ^data_reg[6:0]; // For 7 bits
+                                2'b11: parity_calc <= ^data_reg[7:0]; // For 8 bits
+                            endcase
+                            // Adjust parity based on settings
+                            case ({sticky_parity_sync, eps_sync})
+                                2'b00: parity_calc <= ~parity_calc; // Odd parity
+                                2'b01: parity_calc <= parity_calc;  // Even parity
+                                2'b10: parity_calc <= 1'b1;         // Mark parity
+                                2'b11: parity_calc <= 1'b0;         // Space parity
+                            endcase
+                            pe <= (parity_bit != parity_calc); // Set parity error if mismatch
+                            state <= STOP;
+                            count <= 5'd15;
+                        end else begin
+                            count <= count - 1;
+                        end
+                    end
+
+                    STOP: begin
+                        if (count == 0) begin
+                            if (rx_sync1 == 1'b1) begin
+                                fe <= 1'b0; // No framing error
+                            end else begin
+                                fe <= 1'b1; // Framing error
+                            end
+                            // Overrun error detection
+                            if (push) begin
+                                overrun_detected <= 1'b1; // Previous data not read
+                            end
+                            dout <= data_reg; // Output received data
+                            push <= 1'b1;     // Indicate data is ready
+                            state <= IDLE;
+                        end else begin
+                            count <= count - 1;
+                        end
+                    end
+
+                    default: state <= IDLE;
+                endcase
+            end
+        end
+    end
+
+endmodule

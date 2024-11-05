@@ -1,0 +1,66 @@
+module uart_tx_top_tb;
+
+    reg clk;
+    reg rst;
+    reg baud_pulse;
+    reg pen;
+    reg stb;
+    reg sticky_parity;
+    reg eps;
+    reg set_break;
+    reg [7:0] din;
+    reg [1:0] wls;
+    reg tx_fifo_empty;
+    wire pop;
+    wire tx;
+    wire thre;
+
+    uart_tx_top uut (
+        .clk(clk),
+        .rst(rst),
+        .baud_pulse(baud_pulse),
+        .pen(pen),
+        .stb(stb),
+        .sticky_parity(sticky_parity),
+        .eps(eps),
+        .set_break(set_break),
+        .din(din),
+        .wls(wls),
+        .tx_fifo_empty(tx_fifo_empty),
+        .pop(pop),
+        .tx(tx),
+        .thre(thre)
+    );
+
+    // Clock generation
+    initial clk = 0;
+    always #5 clk = ~clk;
+
+    // Baud pulse generation
+    initial baud_pulse = 0;
+    always #104 baud_pulse = ~baud_pulse; // Assuming 9600 baud rate for simulation
+
+    initial begin
+        // Initialize inputs
+        rst = 1;
+        pen = 1;
+        stb = 0;
+        sticky_parity = 0;
+        eps = 0;
+        set_break = 0;
+        wls = 2'b11; // 8 data bits
+        tx_fifo_empty = 1;
+        din = 8'h55; // Example data
+
+        // Wait for reset
+        #20 rst = 0;
+
+        // Load data into transmitter
+        tx_fifo_empty = 0;
+        #10 tx_fifo_empty = 1; // Simulate data loaded and pop signal asserted
+
+        // Observe the tx line for transmitted data
+        #1000 $stop;
+    end
+
+endmodule

@@ -1,0 +1,168 @@
+`timescale 1ns / 1ps
+
+module fifo_top_tb;
+
+    reg rst;
+    reg clk;
+    reg en;
+    reg push_in;
+    reg pop_in;
+    reg [7:0] din;
+    wire [7:0] dout;
+    wire empty;
+    wire full;
+    wire overrun;
+    wire underrun;
+    reg [3:0] threshold;
+    wire thre_trigger;
+
+    // Instantiate the FIFO
+    fifo_top uut (
+        .rst(rst),
+        .clk(clk),
+        .en(en),
+        .push_in(push_in),
+        .pop_in(pop_in),
+        .din(din),
+        .dout(dout),
+        .empty(empty),
+        .full(full),
+        .overrun(overrun),
+        .underrun(underrun),
+        .threshold(threshold),
+        .thre_trigger(thre_trigger)
+    );
+
+    // Clock generation (50MHz clock)
+    initial clk = 0;
+    always #10 clk = ~clk;
+
+    initial begin
+        // Initialize inputs
+        rst = 1;
+        en = 1;
+        push_in = 0;
+        pop_in = 0;
+        din = 8'd0;
+        threshold = 4'd8; // Set threshold to 8
+
+        // Wait for reset
+        #100 rst = 0;
+
+        // Test Case 1: Basic FIFO Operation
+        $display("Test Case 1: Basic FIFO Operation");
+        push_data(8'hAA);
+        push_data(8'hBB);
+        push_data(8'hCC);
+
+        pop_data();
+        if (dout == 8'hAA) begin
+            $display("Data popped correctly: %h", dout);
+        end else begin
+            $display("Error in data popped: %h", dout);
+        end
+
+        pop_data();
+        if (dout == 8'hBB) begin
+            $display("Data popped correctly: %h", dout);
+        end else begin
+            $display("Error in data popped: %h", dout);
+        end
+
+        pop_data();
+        if (dout == 8'hCC) begin
+            $display("Data popped correctly: %h", dout);
+        end else begin
+            $display("Error in data popped: %h", dout);
+        end
+
+        // Test Case 2: FIFO Full Condition
+        $display("Test Case 2: FIFO Full Condition");
+        // Fill the FIFO
+        for (integer i = 0; i < 16; i = i + 1) begin
+            push_data(i);
+        end
+        // Attempt to push when full
+        push_in = 1;
+        din = 8'hFF;
+        #20;
+        if (overrun) begin
+            $display("Overrun detected as expected when FIFO is full");
+        end else begin
+            $display("Error: Overrun not detected when FIFO is full");
+        end
+        push_in = 0;
+
+        // Test Case 3: FIFO Empty Condition
+        $display("Test Case 3: FIFO Empty Condition");
+        // Empty the FIFO
+        for (integer i = 0; i < 16; i = i + 1) begin
+            pop_data();
+        end
+        // Attempt to pop when empty
+        pop_in = 1;
+        #20;
+        if (underrun) begin
+            $display("Underrun detected as expected when FIFO is empty");
+        end else begin
+            $display("Error: Underrun not detected when FIFO is empty");
+        end
+        pop_in = 0;
+
+        // Test Case 4: Threshold Trigger
+        $display("Test Case 4: Threshold Trigger");
+        // Set threshold to 4
+        threshold = 4'd4;
+        // Push data until threshold is crossed
+        for (integer i = 0; i < 5; i = i + 1) begin
+            push_data(8'h10 + i);
+        end
+        #20;
+        if (thre_trigger) begin
+            $display("Threshold trigger asserted as expected");
+        end else begin
+            $display("Error: Threshold trigger not asserted");
+        end
+
+        // Test Case 5: Simultaneous Push and Pop
+        $display("Test Case 5: Simultaneous Push and Pop");
+        push_in = 1;
+        pop_in = 1;
+        din = 8'h55;
+        #20;
+        push_in = 0;
+        pop_in = 0;
+        #20;
+        if (dout == 8'h15) begin // Expected data
+            $display("Simultaneous push and pop handled correctly");
+        end else begin
+            $display("Error in simultaneous push and pop operation");
+        end
+
+        // Finish simulation
+        #1000;
+        $finish;
+    end
+
+    // Task to push data into FIFO
+    task push_data(input [7:0] data_in);
+        begin
+            push_in = 1;
+            din = data_in;
+            #20; // Wait for one clock cycle
+            push_in = 0;
+            #20;
+        end
+    endtask
+
+    // Task to pop data from FIFO
+    task pop_data();
+        begin
+            pop_in = 1;
+            #20; // Wait for one clock cycle
+            pop_in = 0;
+            #20;
+        end
+    endtask
+
+endmodule

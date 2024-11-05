@@ -1,0 +1,104 @@
+module fifo_top(
+    input rst,                // Asynchronous reset (active high)
+    input clk,                // System clock
+    input en,                 // FIFO enable
+    input push_in,            // Push data into FIFO
+    input pop_in,             // Pop data from FIFO
+    input [7:0] din,          // Data input
+    output reg [7:0] dout,    // Data output
+    output reg empty,         // FIFO empty flag
+    output reg full,          // FIFO full flag
+    output reg overrun,       // Overrun error flag
+    output reg underrun,      // Underrun error flag
+    input [3:0] threshold,    // Threshold for trigger
+    output reg thre_trigger   // Threshold trigger output
+);
+
+    reg [7:0] mem [0:15];     // FIFO memory with 16 entries
+    reg [3:0] wptr;           // Write pointer
+    reg [3:0] rptr;           // Read pointer
+    reg [4:0] count;          // Count of items in FIFO
+
+    // FIFO write operation
+    always @(posedge clk or posedge rst)
+    begin
+        if (rst)
+        begin
+            wptr     <= 4'd0;
+            overrun  <= 1'b0;
+        end
+        else if (push_in && en)
+        begin
+            if (!full)
+            begin
+                mem[wptr] <= din;
+                wptr      <= wptr + 1;
+                overrun   <= 1'b0;
+            end
+            else
+                overrun <= 1'b1; // Cannot write, FIFO is full
+        end
+    end
+
+    // FIFO read operation
+    always @(posedge clk or posedge rst)
+    begin
+        if (rst)
+        begin
+            rptr     <= 4'd0;
+            underrun <= 1'b0;
+            dout     <= 8'd0;
+        end
+        else if (pop_in && en)
+        begin
+            if (!empty)
+            begin
+                dout     <= mem[rptr];
+                rptr     <= rptr + 1;
+                underrun <= 1'b0;
+            end
+            else
+                underrun <= 1'b1; // Cannot read, FIFO is empty
+        end
+    end
+
+    // FIFO count management
+    always @(posedge clk or posedge rst)
+    begin
+        if (rst)
+            count <= 5'd0;
+        else if (en)
+        begin
+            case ({push_in, pop_in})
+                2'b10: count <= (count != 16) ? count + 1 : count; // Push
+                2'b01: count <= (count != 0)  ? count - 1 : count; // Pop
+                default: count <= count; // No change
+            endcase
+        end
+    end
+
+    // Empty and full flag management
+    always @(posedge clk or posedge rst)
+    begin
+        if (rst)
+        begin
+            empty <= 1'b1;
+            full  <= 1'b0;
+        end
+        else
+        begin
+            empty <= (count == 0);
+            full  <= (count == 16);
+        end
+    end
+
+    // Threshold trigger
+    always @(posedge clk or posedge rst)
+    begin
+        if (rst)
+            thre_trigger <= 1'b0;
+        else if (en)
+            thre_trigger <= (count >= threshold);
+    end
+
+endmodule

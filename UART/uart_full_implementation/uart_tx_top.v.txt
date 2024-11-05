@@ -1,0 +1,158 @@
+module uart_tx_top(
+    input wire clk,                // System clock
+    input wire rst,                // Asynchronous reset (active high)
+    input wire baud_pulse,         // Baud rate pulse
+    input wire pen,                // Parity enable
+    input wire stb,                // Stop bit select (0: 1 stop bit, 1: 1.5 or 2 stop bits)
+    input wire sticky_parity,      // Sticky parity select
+    input wire eps,                // Even parity select
+    input wire set_break,          // Break control (forces tx low when asserted)
+    input wire [7:0] din,          // Data input from FIFO
+    input wire [1:0] wls,          // Word length select
+    input wire tx_fifo_empty,      // Transmit FIFO empty flag
+    output reg pop,                // Signal to pop data from transmit FIFO
+    output reg tx,                 // Serial data output
+    output reg thre                // Transmitter Holding Register Empty flag
+);
+
+    // State encoding for FSM
+    typedef enum logic [2:0] {
+        IDLE    = 3'b000,
+        START   = 3'b001,
+        DATA    = 3'b010,
+        PARITY  = 3'b011,
+        STOP    = 3'b100
+    } state_type;
+
+    state_type state;              // Current state
+
+    reg [7:0] shft_reg;            // Shift register for data bits
+    reg [2:0] bitcnt;              // Bit counter for data bits
+    reg parity_bit;                // Calculated parity bit
+    reg tx_data;                   // Data to transmit on tx line
+    reg [1:0] stop_bit_cnt;        // Counter for stop bits
+
+    // Synchronization of control signals
+    reg pen_sync, stb_sync, sticky_parity_sync, eps_sync, set_break_sync;
+    reg [1:0] wls_sync;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            pen_sync            <= 1'b0;
+            stb_sync            <= 1'b0;
+            sticky_parity_sync  <= 1'b0;
+            eps_sync            <= 1'b0;
+            set_break_sync      <= 1'b0;
+            wls_sync            <= 2'b00;
+        end else begin
+            pen_sync            <= pen;
+            stb_sync            <= stb;
+            sticky_parity_sync  <= sticky_parity;
+            eps_sync            <= eps;
+            set_break_sync      <= set_break;
+            wls_sync            <= wls;
+        end
+    end
+
+    // Transmitter logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state       <= IDLE;
+            shft_reg    <= 8'd0;
+            bitcnt      <= 3'd0;
+            parity_bit  <= 1'b0;
+            tx_data     <= 1'b1;   // Idle state is high
+            pop         <= 1'b0;
+            thre        <= 1'b1;   // Transmitter is ready to accept data
+            stop_bit_cnt <= 2'd0;
+        end else begin
+            if (baud_pulse) begin
+                case (state)
+                    IDLE: begin
+                        thre <= 1'b1;     // Transmitter is ready
+                        if (!tx_fifo_empty) begin
+                            pop     <= 1'b1;       // Request data from FIFO
+                            state   <= START;
+                            thre    <= 1'b0;       // Transmitter is busy
+                        end else begin
+                            pop <= 1'b0;
+                        end
+                    end
+
+                    START: begin
+                        pop         <= 1'b0;       // De-assert pop after data is loaded
+                        tx_data     <= 1'b0;       // Start bit is low
+                        shft_reg    <= din;        // Load data into shift register
+
+                        // Determine number of data bits based on word length select
+                        case (wls_sync)
+                            2'b00: bitcnt <= 3'd5; // 5 data bits
+                            2'b01: bitcnt <= 3'd6; // 6 data bits
+                            2'b10: bitcnt <= 3'd7; // 7 data bits
+                            2'b11: bitcnt <= 3'd8; // 8 data bits
+                        endcase
+
+                        // Calculate parity bit based on data and settings
+                        case (wls_sync)
+                            2'b00: parity_bit <= ^din[4:0]; // For 5 bits
+                            2'b01: parity_bit <= ^din[5:0]; // For 6 bits
+                            2'b10: parity_bit <= ^din[6:0]; // For 7 bits
+                            2'b11: parity_bit <= ^din[7:0]; // For 8 bits
+                        endcase
+                        state <= DATA;
+                    end
+
+                    DATA: begin
+                        if (bitcnt > 0) begin
+                            tx_data     <= shft_reg[0]; // Transmit LSB first
+                            shft_reg    <= shft_reg >> 1;
+                            bitcnt      <= bitcnt - 1;
+                        end else begin
+                            if (pen_sync) begin
+                                // Adjust parity bit based on settings
+                                case ({sticky_parity_sync, eps_sync})
+                                    2'b00: parity_bit <= ~parity_bit; // Odd parity
+                                    2'b01: parity_bit <= parity_bit;  // Even parity
+                                    2'b10: parity_bit <= 1'b1;        // Mark parity
+                                    2'b11: parity_bit <= 1'b0;        // Space parity
+                                endcase
+                                state <= PARITY;
+                            end else begin
+                                state <= STOP;
+                                stop_bit_cnt <= (wls_sync == 2'b00 && stb_sync) ? 2'd1 : 2'd0; // 1.5 stop bits for 5-bit words
+                            end
+                        end
+                    end
+
+                    PARITY: begin
+                        tx_data <= parity_bit; // Transmit parity bit
+                        state   <= STOP;
+                        stop_bit_cnt <= (wls_sync == 2'b00 && stb_sync) ? 2'd1 : 2'd0; // 1.5 stop bits for 5-bit words
+                    end
+
+                    STOP: begin
+                        tx_data <= 1'b1;       // Stop bit is high
+                        if (stop_bit_cnt == 0) begin
+                            state <= IDLE;
+                            thre  <= 1'b1;     // Ready for next data
+                        end else begin
+                            stop_bit_cnt <= stop_bit_cnt - 1;
+                        end
+                    end
+
+                    default: state <= IDLE;
+                endcase
+            end
+        end
+    end
+
+    // Output assignment considering break condition
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            tx <= 1'b1; // Idle state
+        end else begin
+            tx <= set_break_sync ? 1'b0 : tx_data; // Force tx low if break is set
+        end
+    end
+
+endmodule

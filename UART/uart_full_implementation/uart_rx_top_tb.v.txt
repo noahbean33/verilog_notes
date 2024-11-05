@@ -1,0 +1,334 @@
+`timescale 1ns / 1ps
+
+module uart_rx_top_tb;
+
+    reg clk;
+    reg rst;
+    reg baud_pulse;
+    reg rx;
+    reg sticky_parity;
+    reg eps;
+    reg pen;
+    reg [1:0] wls;
+    wire push;
+    wire pe;
+    wire fe;
+    wire bi;
+    wire oe;
+    wire [7:0] dout;
+
+    // Instantiate the UART Receiver
+    uart_rx_top uut (
+        .clk(clk),
+        .rst(rst),
+        .baud_pulse(baud_pulse),
+        .rx(rx),
+        .sticky_parity(sticky_parity),
+        .eps(eps),
+        .pen(pen),
+        .wls(wls),
+        .push(push),
+        .pe(pe),
+        .fe(fe),
+        .bi(bi),
+        .oe(oe),
+        .dout(dout)
+    );
+
+    // Clock generation (50MHz clock)
+    initial clk = 0;
+    always #10 clk = ~clk; // 20ns period
+
+    // Baud pulse generation (for testing purposes)
+    reg [15:0] baud_counter;
+    parameter BAUD_DIV = 16'd5208; // For 9600 baud rate with 50MHz clock
+
+    initial begin
+        baud_pulse = 0;
+        baud_counter = 0;
+    end
+
+    always @(posedge clk) begin
+        if (baud_counter >= BAUD_DIV) begin
+            baud_pulse <= ~baud_pulse;
+            baud_counter <= 0;
+        end else begin
+            baud_counter <= baud_counter + 1;
+        end
+    end
+
+    // Test procedure
+    initial begin
+        // Initialize inputs
+        rst = 1;
+        rx = 1; // Idle state is high
+        sticky_parity = 0;
+        eps = 0;
+        pen = 0;
+        wls = 2'b11; // Default to 8 data bits
+
+        // Wait for reset
+        #100 rst = 0;
+
+        // Test Case 1: Basic Data Reception (8 data bits, no parity)
+        $display("Test Case 1: Basic Data Reception (8 data bits, no parity)");
+        pen = 0; // Parity disabled
+        wls = 2'b11; // 8 data bits
+        transmit_data(8'hA5, wls, pen, sticky_parity, eps);
+
+        // Wait for data reception
+        wait (push);
+        #20;
+        if (dout == 8'hA5 && pe == 0 && fe == 0 && oe == 0 && bi == 0) begin
+            $display("Test Case 1 Passed: Received data = %h", dout);
+        end else begin
+            $display("Test Case 1 Failed: Received data = %h, pe=%b, fe=%b, oe=%b, bi=%b", dout, pe, fe, oe, bi);
+        end
+
+        // Test Case 2: Parity Enabled (Even Parity)
+        $display("Test Case 2: Parity Enabled (Even Parity)");
+        pen = 1;
+        eps = 1; // Even parity
+        transmit_data(8'h5A, wls, pen, sticky_parity, eps);
+
+        wait (push);
+        #20;
+        if (dout == 8'h5A && pe == 0) begin
+            $display("Test Case 2 Passed: Received data with even parity");
+        end else begin
+            $display("Test Case 2 Failed: Parity error = %b", pe);
+        end
+
+        // Test Case 3: Parity Error Detection
+        $display("Test Case 3: Parity Error Detection");
+        // Send data with incorrect parity
+        send_frame_with_incorrect_parity(8'h5A, wls, sticky_parity, eps);
+
+        wait (push);
+        #20;
+        if (pe == 1) begin
+            $display("Test Case 3 Passed: Parity error detected");
+        end else begin
+            $display("Test Case 3 Failed: Parity error not detected");
+        end
+
+        // Test Case 4: Framing Error Detection
+        $display("Test Case 4: Framing Error Detection");
+        send_frame_with_incorrect_stop_bit(8'hA5, wls, pen, sticky_parity, eps);
+
+        wait (push);
+        #20;
+        if (fe == 1) begin
+            $display("Test Case 4 Passed: Framing error detected");
+        end else begin
+            $display("Test Case 4 Failed: Framing error not detected");
+        end
+
+        // Test Case 5: Overrun Error Detection
+        $display("Test Case 5: Overrun Error Detection");
+        simulate_overrun_error(8'hAA, wls, pen, sticky_parity, eps);
+
+        // Test Case 6: Break Condition Detection
+        $display("Test Case 6: Break Condition Detection");
+        simulate_break_condition();
+
+        // Finish simulation
+        #1000;
+        $finish;
+    end
+
+    // Task to transmit data with correct parity and stop bits
+    task transmit_data(
+        input [7:0] data,
+        input [1:0] word_length,
+        input parity_enable,
+        input sticky_parity,
+        input even_parity_select
+    );
+        reg [10:0] frame;
+        integer num_data_bits;
+        reg parity_bit;
+        begin
+            // Determine number of data bits
+            case (word_length)
+                2'b00: num_data_bits = 5;
+                2'b01: num_data_bits = 6;
+                2'b10: num_data_bits = 7;
+                2'b11: num_data_bits = 8;
+            endcase
+
+            // Start bit
+            frame[0] = 1'b0;
+
+            // Data bits
+            frame[num_data_bits:1] = data[num_data_bits-1:0];
+
+            // Parity bit
+            if (parity_enable) begin
+                parity_bit = ^data[num_data_bits-1:0]; // Calculate parity
+                if (even_parity_select)
+                    parity_bit = parity_bit; // Even parity
+                else
+                    parity_bit = ~parity_bit; // Odd parity
+                frame[num_data_bits+1] = parity_bit;
+            end
+
+            // Stop bit
+            frame[num_data_bits+2] = 1'b1;
+
+            // Transmit frame
+            send_frame(frame, num_data_bits + 3);
+        end
+    endtask
+
+    // Task to send frame with incorrect parity
+    task send_frame_with_incorrect_parity(
+        input [7:0] data,
+        input [1:0] word_length,
+        input sticky_parity,
+        input even_parity_select
+    );
+        reg [10:0] frame;
+        integer num_data_bits;
+        reg parity_bit;
+        begin
+            // Determine number of data bits
+            case (word_length)
+                2'b00: num_data_bits = 5;
+                2'b01: num_data_bits = 6;
+                2'b10: num_data_bits = 7;
+                2'b11: num_data_bits = 8;
+            endcase
+
+            // Start bit
+            frame[0] = 1'b0;
+
+            // Data bits
+            frame[num_data_bits:1] = data[num_data_bits-1:0];
+
+            // Incorrect Parity bit
+            parity_bit = ~(^data[num_data_bits-1:0]); // Flip the parity bit to introduce error
+            frame[num_data_bits+1] = parity_bit;
+
+            // Stop bit
+            frame[num_data_bits+2] = 1'b1;
+
+            // Transmit frame
+            send_frame(frame, num_data_bits + 3);
+        end
+    endtask
+
+    // Task to send frame with incorrect stop bit
+    task send_frame_with_incorrect_stop_bit(
+        input [7:0] data,
+        input [1:0] word_length,
+        input parity_enable,
+        input sticky_parity,
+        input even_parity_select
+    );
+        reg [10:0] frame;
+        integer num_data_bits;
+        reg parity_bit;
+        begin
+            // Determine number of data bits
+            case (word_length)
+                2'b00: num_data_bits = 5;
+                2'b01: num_data_bits = 6;
+                2'b10: num_data_bits = 7;
+                2'b11: num_data_bits = 8;
+            endcase
+
+            // Start bit
+            frame[0] = 1'b0;
+
+            // Data bits
+            frame[num_data_bits:1] = data[num_data_bits-1:0];
+
+            // Parity bit
+            if (parity_enable) begin
+                parity_bit = ^data[num_data_bits-1:0]; // Calculate parity
+                if (even_parity_select)
+                    parity_bit = parity_bit; // Even parity
+                else
+                    parity_bit = ~parity_bit; // Odd parity
+                frame[num_data_bits+1] = parity_bit;
+            end
+
+            // Incorrect Stop bit (set to 0 instead of 1)
+            frame[num_data_bits+2] = 1'b0;
+
+            // Transmit frame
+            send_frame(frame, num_data_bits + 3);
+        end
+    endtask
+
+    // Task to simulate overrun error
+    task simulate_overrun_error(
+        input [7:0] data,
+        input [1:0] word_length,
+        input parity_enable,
+        input sticky_parity,
+        input even_parity_select
+    );
+        begin
+            // First data frame
+            transmit_data(data, word_length, parity_enable, sticky_parity, even_parity_select);
+
+            // Immediately send another data frame without waiting for previous data to be read
+            transmit_data(~data, word_length, parity_enable, sticky_parity, even_parity_select);
+
+            // Wait for data reception
+            wait (push);
+            #20;
+            if (oe == 1) begin
+                $display("Test Case 5 Passed: Overrun error detected");
+            end else begin
+                $display("Test Case 5 Failed: Overrun error not detected");
+            end
+        end
+    endtask
+
+    // Task to simulate break condition
+    task simulate_break_condition();
+        begin
+            // Hold rx line low longer than a normal frame
+            rx = 0;
+            #100000; // Duration longer than a normal frame
+            rx = 1;
+
+            // Check for break interrupt
+            if (bi == 1) begin
+                $display("Test Case 6 Passed: Break condition detected");
+            end else begin
+                $display("Test Case 6 Failed: Break condition not detected");
+            end
+        end
+    endtask
+
+    // Task to send frame bit by bit
+    task send_frame(
+        input [10:0] frame,
+        input integer total_bits
+    );
+        integer idx;
+        begin
+            // Send bits
+            for (idx = 0; idx < total_bits; idx = idx + 1) begin
+                rx = frame[idx];
+                // Wait for one baud period
+                wait_for_baud_edge();
+            end
+            // Return rx to idle state
+            rx = 1'b1;
+        end
+    endtask
+
+    // Task to wait for baud pulse edge
+    task wait_for_baud_edge();
+        begin
+            @(negedge baud_pulse);
+            @(posedge baud_pulse);
+        end
+    endtask
+
+endmodule
